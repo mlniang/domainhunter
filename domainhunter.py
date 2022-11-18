@@ -314,7 +314,6 @@ If you plan to use this content for illegal purpose, don't.  Have a nice day :)\
     data = []
 
     # Generate list of URLs to query for expired/deleted domains
-    proxies = {'http': 'http://127.0.0.1:8080', 'https': 'http://127.0.0.1:8080'}
     try:
         expired_domains = ExpiredDomains(username, password)
         time.sleep(2)
