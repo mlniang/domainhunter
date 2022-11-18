@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 18 November 2022
+
++ Removed Dockerfile
++ Isolate providers from main file for future flexibility 
++ Isolate ExpiredDomains as a source in domains folder
++ Fixed talosintelligence
+
 ## 25 October 2022
 
 + Add McAfee Web Gateway (Cloud) reputation check by @froyo75 adopted from PR [#37](https://github.com/threatexpress/domainhunter/pull/37)

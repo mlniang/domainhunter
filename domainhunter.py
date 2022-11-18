@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 ## Title:       domainhunter.py
 ## Author:      @joevest and @andrewchiles
@@ -13,16 +13,18 @@ import time
 import random
 import argparse
 import json
-import base64
 import os
 import sys
 from urllib.parse import urlparse
-import getpass
 
-# Bluecoat XSRF
-from hashlib import sha256
+from providers.bluecoat import Bluecoat
+from providers.cisco_talos import CiscoTalos
+from providers.cisco_umbrella import CiscoUmbrella
+from providers.ibm_xforce import IBMXForce
+from providers.mcafee_wg import McAfeeWG
+from domains.expired_domains import ExpiredDomains
 
-__version__ = "20221025"
+__version__ = "20221118"
 
 ## Functions
 
@@ -41,270 +43,6 @@ def doSleep(timing):
         time.sleep(random.randrange(5,10))
     # There's no elif timing == 5 here because we don't want to sleep for -t 5
 
-def checkUmbrella(domain):
-    """Umbrella Domain reputation service"""
-
-    try:
-        url = 'https://investigate.api.umbrella.com/domains/categorization/?showLabels'
-        postData = [domain]
-
-        headers = {
-            'User-Agent':useragent,
-            'Content-Type':'application/json; charset=UTF-8',
-            'Authorization': 'Bearer {}'.format(umbrella_apikey)
-        }
-
-        print('[*] Umbrella: {}'.format(domain))
-        
-        response = s.post(url,headers=headers,json=postData,verify=False,proxies=proxies)
-        responseJSON = json.loads(response.text)
-        if len(responseJSON[domain]['content_categories']) > 0:
-            return responseJSON[domain]['content_categories'][0]
-        else:
-            return 'Uncategorized'
-
-    except Exception as e:
-        print('[-] Error retrieving Umbrella reputation! {0}'.format(e))
-        return "error"
-
-def checkBluecoat(domain):
-    """Symantec Sitereview Domain Reputation"""
-
-    try:
-        headers = {
-            'User-Agent':useragent,
-            'Referer':'http://sitereview.bluecoat.com/'}
-
-        # Establish our session information
-        response = s.get("https://sitereview.bluecoat.com/",headers=headers,verify=False,proxies=proxies)
-        response = s.head("https://sitereview.bluecoat.com/resource/captcha-request",headers=headers,verify=False,proxies=proxies)
-        
-        # Pull the XSRF Token from the cookie jar
-        session_cookies = s.cookies.get_dict()
-        if "XSRF-TOKEN" in session_cookies:
-            token = session_cookies["XSRF-TOKEN"]
-        else:
-            raise NameError("No XSRF-TOKEN found in the cookie jar")
- 
-        # Perform SiteReview lookup
-        
-        # BlueCoat Added base64 encoded phrases selected at random and sha256 hashing of the JSESSIONID
-        phrases = [
-            'UGxlYXNlIGRvbid0IGZvcmNlIHVzIHRvIHRha2UgbWVhc3VyZXMgdGhhdCB3aWxsIG1ha2UgaXQgbW9yZSBkaWZmaWN1bHQgZm9yIGxlZ2l0aW1hdGUgdXNlcnMgdG8gbGV2ZXJhZ2UgdGhpcyBzZXJ2aWNlLg==',
-            'SWYgeW91IGNhbiByZWFkIHRoaXMsIHlvdSBhcmUgbGlrZWx5IGFib3V0IHRvIGRvIHNvbWV0aGluZyB0aGF0IGlzIGFnYWluc3Qgb3VyIFRlcm1zIG9mIFNlcnZpY2U=',
-            'RXZlbiBpZiB5b3UgYXJlIG5vdCBwYXJ0IG9mIGEgY29tbWVyY2lhbCBvcmdhbml6YXRpb24sIHNjcmlwdGluZyBhZ2FpbnN0IFNpdGUgUmV2aWV3IGlzIHN0aWxsIGFnYWluc3QgdGhlIFRlcm1zIG9mIFNlcnZpY2U=',
-            'U2NyaXB0aW5nIGFnYWluc3QgU2l0ZSBSZXZpZXcgaXMgYWdhaW5zdCB0aGUgU2l0ZSBSZXZpZXcgVGVybXMgb2YgU2VydmljZQ=='
-        ]
-        
-        # New Bluecoat XSRF Code added May 2022 thanks to @froyo75
-        xsrf_token_parts = token.split('-')
-        xsrf_random_part = random.choice(xsrf_token_parts)
-        key_data = xsrf_random_part + ': ' + token
-        # Key used as part of POST data
-        key = sha256(key_data.encode('utf-8')).hexdigest()
-        random_phrase = base64.b64decode(random.choice(phrases)).decode('utf-8')
-        phrase_data = xsrf_random_part + ': ' + random_phrase
-        # Phrase used as part of POST data
-        phrase = sha256(phrase_data.encode('utf-8')).hexdigest()
-        
-        postData = {
-            'url':domain,
-            'captcha':'',
-            'key':key,
-            'phrase':phrase, # Pick a random base64 phrase from the list
-            'source':'new-lookup'}
-
-        headers = {'User-Agent':useragent,
-                   'Accept':'application/json, text/plain, */*',
-                   'Accept-Language':'en_US',
-                   'Content-Type':'application/json; charset=UTF-8',
-                   'X-XSRF-TOKEN':token,
-                   'Referer':'http://sitereview.bluecoat.com/'}
-
-        print('[*] BlueCoat: {}'.format(domain))
-        response = s.post('https://sitereview.bluecoat.com/resource/lookup',headers=headers,json=postData,verify=False,proxies=proxies)
-        
-        # Check for any HTTP errors
-        if response.status_code != 200:
-            a = "HTTP Error ({}-{}) - Is your IP blocked?".format(response.status_code,response.reason)
-        else:
-            responseJSON = json.loads(response.text)
-        
-            if 'errorType' in responseJSON:
-                a = responseJSON['errorType']
-            else:
-                a = responseJSON['categorization'][0]['name']
-        
-            # Print notice if CAPTCHAs are blocking accurate results and attempt to solve if --ocr
-            if a == 'captcha':
-                if ocr:
-                    # This request is also performed by a browser, but is not needed for our purposes
-                    #captcharequestURL = 'https://sitereview.bluecoat.com/resource/captcha-request'
-
-                    print('[*] Received CAPTCHA challenge!')
-                    captcha = solveCaptcha('https://sitereview.bluecoat.com/resource/captcha.jpg',s)
-                    
-                    if captcha:
-                        b64captcha = base64.urlsafe_b64encode(captcha.encode('utf-8')).decode('utf-8')
-                    
-                        # Send CAPTCHA solution via GET since inclusion with the domain categorization request doesn't work anymore
-                        captchasolutionURL = 'https://sitereview.bluecoat.com/resource/captcha-request/{0}'.format(b64captcha)
-                        print('[*] Submiting CAPTCHA at {0}'.format(captchasolutionURL))
-                        response = s.get(url=captchasolutionURL,headers=headers,verify=False,proxies=proxies)
-
-                        # Try the categorization request again
-
-                        response = s.post('https://sitereview.bluecoat.com/resource/lookup',headers=headers,json=postData,verify=False,proxies=proxies)
-
-                        responseJSON = json.loads(response.text)
-
-                        if 'errorType' in responseJSON:
-                            a = responseJSON['errorType']
-                        else:
-                            a = responseJSON['categorization'][0]['name']
-                    else:
-                        print('[-] Error: Failed to solve BlueCoat CAPTCHA with OCR! Manually solve at "https://sitereview.bluecoat.com/sitereview.jsp"')
-                else:
-                    print('[-] Error: BlueCoat CAPTCHA received. Try --ocr flag or manually solve a CAPTCHA at "https://sitereview.bluecoat.com/sitereview.jsp"')
-        return a
-
-    except Exception as e:
-        print('[-] Error retrieving Bluecoat reputation! {0}'.format(e))
-        return "error"
-
-def checkIBMXForce(domain):
-    """IBM XForce Domain Reputation"""
-
-    try: 
-        url = 'https://exchange.xforce.ibmcloud.com/url/{}'.format(domain)
-        headers = {'User-Agent':useragent,
-                    'Accept':'application/json, text/plain, */*',
-                    'x-ui':'XFE',
-                    'Origin':url,
-                    'Referer':url}
-
-        print('[*] IBM xForce: {}'.format(domain))
-
-        url = 'https://api.xforce.ibmcloud.com/url/{}'.format(domain)
-        response = s.get(url,headers=headers,verify=False,proxies=proxies)
-
-        responseJSON = json.loads(response.text)
-
-        if 'error' in responseJSON:
-            a = responseJSON['error']
-
-        elif not responseJSON['result']['cats']:
-            a = 'Uncategorized'
-	
-	## TO-DO - Add noticed when "intrusion" category is returned. This is indication of rate limit / brute-force protection hit on the endpoint        
-
-        else:
-            categories = ''
-            # Parse all dictionary keys and append to single string to get Category names
-            for key in responseJSON['result']['cats']:
-                categories += '{0}, '.format(str(key))
-
-            a = '{0}(Score: {1})'.format(categories,str(responseJSON['result']['score']))
-
-        return a
-
-    except Exception as e:
-        print('[-] Error retrieving IBM-Xforce reputation! {0}'.format(e))
-        return "error"
-
-def checkTalos(domain):
-    """Cisco Talos Domain Reputation"""
-
-    url = 'https://www.talosintelligence.com/sb_api/query_lookup?query=%2Fapi%2Fv2%2Fdetails%2Fdomain%2F&query_entry={0}&offset=0&order=ip+asc'.format(domain)
-    headers = {'User-Agent':useragent,
-               'Referer':url}
-
-    print('[*] Cisco Talos: {}'.format(domain))
-    try:
-        response = s.get(url,headers=headers,verify=False,proxies=proxies)
-
-        responseJSON = json.loads(response.text)
-
-        if 'error' in responseJSON:
-            a = str(responseJSON['error'])
-            if a == "Unfortunately, we can't find any results for your search.":
-                a = 'Uncategorized'
-        
-        elif responseJSON['category'] is None:
-            a = 'Uncategorized'
-
-        else:
-            a = '{0} (Score: {1})'.format(str(responseJSON['category']['description']), str(responseJSON['web_score_name']))
-       
-        return a
-
-    except Exception as e:
-        print('[-] Error retrieving Talos reputation! {0}'.format(e))
-        return "error"
-
-def checkMcAfeeWG(domain):
-    """McAfee Web Gateway Domain Reputation"""
-
-    try:
-        print('[*] McAfee Web Gateway (Cloud): {}'.format(domain))
-
-        # HTTP Session container, used to manage cookies, session tokens and other session information
-        s = requests.Session()
-
-        headers = {
-                'User-Agent':useragent,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'Referer':'https://sitelookup.mcafee.com/'
-                }  
-
-        # Establish our session information
-        response = s.get("https://sitelookup.mcafee.com",headers=headers,verify=False,proxies=proxies)
-
-        # Pull the hidden attributes from the response
-        soup = BeautifulSoup(response.text,"html.parser")
-        hidden_tags = soup.find_all("input",  {"type": "hidden"})
-        for tag in hidden_tags:
-            if tag['name'] == 'sid':
-                sid = tag['value']
-            elif tag['name'] == 'e':
-                e = tag['value']
-            elif tag['name'] == 'c':
-                c = tag['value']
-            elif tag['name'] == 'p':
-                p = tag['value']
-
-        # Retrieve the categorization infos 
-        multipart_form_data = {
-            'sid': (None, sid),
-            'e': (None, e),
-            'c': (None, c),
-            'p': (None, p),
-            'action': (None, 'checksingle'),
-            'product': (None, '14-ts'),
-            'url': (None, domain)
-        }
-
-        response = s.post('https://sitelookup.mcafee.com/en/feedback/url',headers=headers,files=multipart_form_data,verify=False,proxies=proxies)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text,"html.parser")
-            for table in soup.findAll("table", {"class": ["result-table"]}):
-                datas = table.find_all('td')
-                if "not valid" in datas[2].text:
-                    a = 'Uncategorized'
-                else:
-                    status = datas[2].text
-                    category = (datas[3].text[1:]).strip().replace('-',' -')
-                    web_reputation = datas[4].text
-                    a = '{0}, Status: {1}, Web Reputation: {2}'.format(category,status,web_reputation)
-            return a
-        else:
-            raise Exception
-
-    except Exception as e:
-        print('[-] Error retrieving McAfee Web Gateway Domain Reputation!')
-        return "error"
 
 def downloadMalwareDomains(malwaredomainsURL):
     """Downloads a current list of known malicious domains"""
@@ -317,35 +55,57 @@ def downloadMalwareDomains(malwaredomainsURL):
     else:
         print("[-] Error reaching:{}  Status: {}").format(url, response.status_code)
 
-def checkDomain(domain):
+def checkDomain(domain, unwantedResults = []):
     """Executes various domain reputation checks included in the project"""
 
+    result = [domain]
     print('[*] Fetching domain reputation for: {}'.format(domain))
 
     if domain in maldomainsList:
         print("[!] {}: Identified as known malware domain (malwaredomains.com)".format(domain))
       
-    bluecoat = checkBluecoat(domain)
-    print("[+] {}: {}".format(domain, bluecoat))
+    bluecoat = Bluecoat().check(domain, proxies)
+    if bluecoat not in unwantedResults:
+        print("[+] {}: {}".format(domain, bluecoat))
+        result.append(bluecoat)
+    else:
+        result.append("****")
     
-    ibmxforce = checkIBMXForce(domain)
-    print("[+] {}: {}".format(domain, ibmxforce))
+    ibmxforce = IBMXForce().check(domain, proxies)
+    if not ibmxforce in unwantedResults:
+        print("[+] {}: {}".format(domain, ibmxforce))
+        result.append(ibmxforce)
+    else:
+        result.append("****")
 
-    ciscotalos = checkTalos(domain)
-    print("[+] {}: {}".format(domain, ciscotalos))
+    ciscotalos = CiscoTalos().check(domain, proxies)
+    if not ciscotalos in unwantedResults:
+        print("[+] {}: {}".format(domain, ciscotalos))
+        result.append(ciscotalos)
+    else:
+        result.append("****")
 
-    umbrella = "not available"
-    if len(umbrella_apikey):
-        umbrella = checkUmbrella(domain)
-        print("[+] {}: {}".format(domain, umbrella))
+    try:
+        umbrella = CiscoUmbrella(umbrella_apikey).check(domain, proxies)
+        if not umbrella in unwantedResults:
+            print("[+] {}: {}".format(domain, umbrella))
+            result.append(umbrella)
+        else:
+            result.append("****")
+    except Exception as e:
+        umbrella = '[-] Error retrieving Umbrella reputation! {0}'.format(e)
 
-    mcafeewg = checkMcAfeeWG(domain)
-    print("[+] {}: {}".format(domain, mcafeewg))
+    mcafeewg = McAfeeWG().check(domain, proxies)
+    if not mcafeewg in unwantedResults:
+        print("[+] {}: {}".format(domain, mcafeewg))
+        result.append(mcafeewg)
+    else:
+        result.append("****")
+
 
     print("")
     
-    results = [domain,bluecoat,ibmxforce,ciscotalos,umbrella,mcafeewg]
-    return results
+    return result
 
 def solveCaptcha(url,session):  
     """Downloads CAPTCHA image and saves to current directory for OCR with tesseract"""
@@ -388,35 +148,8 @@ def drawTable(header,data):
     
     return(t.draw())
 
-def loginExpiredDomains():
-    """Login to the ExpiredDomains site with supplied credentials"""
-
-    data = "login=%s&password=%s&redirect_2_url=/begin" % (username, password)
-    
-    headers["Content-Type"] = "application/x-www-form-urlencoded"
-    r = s.post(expireddomainHost + "/login/", headers=headers, data=data, proxies=proxies, verify=False, allow_redirects=False)
-    cookies = s.cookies.get_dict()
-
-    if "location" in r.headers:
-        if "/login/" in r.headers["location"]:
-            print("[!] Login failed")
-            sys.exit()
-
-    if "ExpiredDomainssessid" in cookies:
-        print("[+] Login successful.  ExpiredDomainssessid: %s" % (cookies["ExpiredDomainssessid"]))
-    else:
-        print("[!] Login failed")
-        sys.exit()
-
-def getIndex(cells, index):
-        if cells[index].find("a") == None:
-            return cells[index].text.strip()
-        
-        return cells[index].find("a").text.strip()
-
 ## MAIN
 if __name__ == "__main__":
-
 
     parser = argparse.ArgumentParser(
         description='Finds expired domains, domain categorization, and Archive.org history to determine good candidates for C2 and phishing domains',
@@ -430,7 +163,7 @@ Examples:
         formatter_class=argparse.RawDescriptionHelpFormatter)
 
     parser.add_argument('-a','--alexa', help='Filter results to Alexa listings', required=False, default=0, action='store_const', const=1)
-    parser.add_argument('-k','--keyword', help='Keyword used to refine search results', required=False, default=False, type=str, dest='keyword')
+    parser.add_argument('-k','--keyword', help='Keyword used to refine search results', required=False, default="", type=str, dest='keyword')
     parser.add_argument('-c','--check', help='Perform domain reputation checks', required=False, default=False, action='store_true', dest='check')
     parser.add_argument('-f','--filename', help='Specify input file of line delimited domain names to check', required=False, default=False, type=str, dest='filename')
     parser.add_argument('--ocr', help='Perform OCR on CAPTCHAs when challenged', required=False, default=False, action='store_true')
@@ -509,8 +242,6 @@ Examples:
     umbrella_apikey = args.umbrella_apikey
 
     malwaredomainsURL = 'https://gitlab.com/gerowen/old-malware-domains-ad-list/-/raw/master/malwaredomainslist.txt'
-    expireddomainsqueryURL = 'https://www.expireddomains.net/domain-name-search'
-    expireddomainHost = "https://member.expireddomains.net"
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
 
@@ -580,115 +311,26 @@ If you plan to use this content for illegal purpose, don't.  Have a nice day :)\
             exit(1)
         exit(0)
 
-    # Lists for our ExpiredDomains results
-    domain_list = []
     data = []
 
     # Generate list of URLs to query for expired/deleted domains
-    urls = []
-    if username == None or username == "":
-        print('[-] Error: ExpiredDomains.net requires a username! Use the --username parameter')
+    proxies = {'http': 'http://127.0.0.1:8080', 'https': 'http://127.0.0.1:8080'}
+    try:
+        expired_domains = ExpiredDomains(username, password)
+        time.sleep(2)
+        expired_domains.login(proxies=proxies)
+    except Exception as e:
+        print("{0}".format(e))
         exit(1)
-    if args.password == None or args.password == "":
-        password = getpass.getpass("expireddomains.net Password: ")
-
-    loginExpiredDomains()
     
-    m = 200
-    if maxresults < m:
-        m = maxresults
-
-    for i in range (0,(maxresults),m):
-        k=""
-        if keyword:
-            k=keyword
-        urls.append('{}/domains/combinedexpired/?fwhois=22&fadult=1&start={}&ftlds[]=2&ftlds[]=3&ftlds[]=4&flimit={}&fdomain={}&fdomainstart={}&fdomainend={}&falexa={}'.format(expireddomainHost,i,m,k,keyword_start,keyword_end,alexa))
-
-    max_reached = False
-    for url in urls:
-
-        print("[*] {}".format(url))
-        domainrequest = s.get(url,headers=headers,verify=False,proxies=proxies)
-        domains = domainrequest.text
-   
-        # Turn the HTML into a Beautiful Soup object
-        soup = BeautifulSoup(domains, 'html.parser')
-
-        try:
-            table = soup.find_all("table", class_="base1")
-            tbody = table[0].select("tbody tr")
-            
-
-            for row in tbody:
-                # Alternative way to extract domain name
-                # domain = row.find('td').find('a').text
-
-                cells = row.findAll("td")
-                
-                if len(cells) == 1:
-                    max_reached = True
-                    break # exit if max rows reached
-
-                if len(cells) >= 1:
-                    c0 = getIndex(cells, 0).lower()   # domain
-                    c1 = getIndex(cells, 3)   # bl
-                    c2 = getIndex(cells, 4)   # domainpop
-                    c3 = getIndex(cells, 5)   # birth
-                    c4 = getIndex(cells, 7)   # Archive.org entries
-                    c5 = getIndex(cells, 8)   # Alexa
-                    c6 = getIndex(cells, 10)  # Dmoz.org
-                    c7 = getIndex(cells, 12)  # status com
-                    c8 = getIndex(cells, 13)  # status net
-                    c9 = getIndex(cells, 14)  # status org
-                    c10 = getIndex(cells, 17)  # status de
-                    c11 = getIndex(cells, 11)  # TLDs
-                    c12 = getIndex(cells, 19)  # RDT
-                    c13 = ""                    # List
-                    c14 = getIndex(cells, 22)  # Status
-                    c15 = ""                    # links
-
-                    # create available TLD list
-                    available = ''
-                    if c7 == "available":
-                        available += ".com "
-
-                    if c8 == "available":
-                        available += ".net "
-
-                    if c9 == "available":
-                        available += ".org "
-
-                    if c10 == "available":
-                        available += ".de "
-                    
-                    # Only grab status for keyword searches since it doesn't exist otherwise
-                    status = ""
-                    if keyword:
-                        status = c14
-
-                    if keyword:
-                        # Only add Expired, not Pending, Backorder, etc
-                        # "expired" isn't returned any more, I changed it to "available"
-                        if c14 == "available": # I'm not sure about this, seems like "expired" isn't an option anymore.  expireddomains.net might not support this any more.
-                            # Append parsed domain data to list if it matches our criteria (.com|.net|.org and not a known malware domain)
-                            if (c0.lower().endswith(".com") or c0.lower().endswith(".net") or c0.lower().endswith(".org")) and (c0 not in maldomainsList):
-                                domain_list.append([c0,c3,c4,available,status])
-                        
-                    # Non-keyword search table format is slightly different
-                    else:
-                        # Append original parsed domain data to list if it matches our criteria (.com|.net|.org and not a known malware domain)
-                        if (c0.lower().endswith(".com") or c0.lower().endswith(".net") or c0.lower().endswith(".org")) and (c0 not in maldomainsList):
-                            domain_list.append([c0,c3,c4,available,status]) 
-            if max_reached:
-                print("[*] All records returned")
-                break
-
-        except Exception as e: 
-            print("[!] Error: ", e)
-            pass
-
-        # Add additional sleep on requests to ExpiredDomains.net to avoid errors
-        time.sleep(5)
+    domain_list = expired_domains.list_domains(
+        maxresults=maxresults,
+        keyword=keyword,
+        keyword_start = keyword_start,
+        keyword_end = keyword_end,
+        alexa = alexa,
+        proxies=proxies
+    )
 
     # Check for valid list results before continuing
     if len(domain_list) == 0:
@@ -718,40 +360,19 @@ If you plan to use this content for illegal purpose, don't.  Have a nice day :)\
             if check:
                 unwantedResults = ['Uncategorized','error','Not found.','Spam','Spam URLs','Pornography','badurl','Suspicious','Malicious Sources/Malnets','captcha','Phishing','Placeholders']
                 
-                bluecoat = checkBluecoat(domain)
-                if bluecoat not in unwantedResults:
-                    print("[+] Bluecoat - {}: {}".format(domain, bluecoat))
-                
-                ibmxforce = checkIBMXForce(domain)
-                if ibmxforce not in unwantedResults:
-                    print("[+] IBM XForce - {}: {}".format(domain, ibmxforce))
-                
-                ciscotalos = checkTalos(domain)
-                if ciscotalos not in unwantedResults:
-                    print("[+] Cisco Talos {}: {}".format(domain, ciscotalos))
-
-                if len(umbrella_apikey):
-                    umbrella = checkUmbrella(domain)
-                    if umbrella not in unwantedResults:
-                        print("[+] Umbrella {}: {}".format(domain, umbrella))
-
-                mcafeewg = checkMcAfeeWG(domain)
-                if mcafeewg not in unwantedResults:
-                    print("[+] McAfee Web Gateway (Cloud) {}: {}".format(domain, mcafeewg))
-
-                print("")
+                results = checkDomain(domain, unwantedResults)
                 # Sleep to avoid captchas
                 doSleep(timing)
 
             # Append entry to new list with reputation if at least one service reports reputation
             if not (\
-                (bluecoat in ('Uncategorized','badurl','Suspicious','Malicious Sources/Malnets','captcha','Phishing','Placeholders','Spam','error')) \
-                and (ibmxforce in ('Not found.','error')) \
-                and (ciscotalos in ('Uncategorized','error')) \
-                and (umbrella in ('Uncategorized','None')) \
-                and (mcafeewg in ('Uncategorized','error'))):
+                (result[1] in ('Uncategorized','badurl','Suspicious','Malicious Sources/Malnets','captcha','Phishing','Placeholders','Spam','error')) \
+                and (result[2] in ('Not found.','error')) \
+                and (result[3] in ('Uncategorized','error')) \
+                and (result[4] in ('Uncategorized','None')) \
+                and (result[5] in ('Uncategorized','error'))):
                 
-                data.append([domain,birthdate,archiveentries,availabletlds,status,bluecoat,ibmxforce,ciscotalos,umbrella,mcafeewg])
+                data.append([domain,birthdate,archiveentries,availabletlds,status,result[1],result[2],result[3],result[4],result[5]])
 
     # Sort domain list by column 2 (Birth Year)
     sortedDomains = sorted(data, key=lambda x: x[1], reverse=True) 

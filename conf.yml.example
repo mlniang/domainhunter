@@ -1,0 +1,8 @@
+providers:
+  cisco:
+    umbrella:
+      key: API_KEY
+sources:
+  expired-domains:
+    username: Username goes here
+    password: Optional password, you will be prompted if not present

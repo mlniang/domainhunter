@@ -1,6 +1,6 @@
 # Domain Hunter
 
-Authors Joe Vest (@joevest) & Andrew Chiles (@andrewchiles)
+Forked from [threatexpress/domainhunter](https://github.com/threatexpress/domainhunter). Credits and thanks to them.
 
 Domain name selection is an important aspect of preparation for penetration tests and especially Red Team engagements. Commonly, domains that were used previously for benign purposes and were properly categorized can be purchased for only a few dollars. Such domains can allow a team to bypass reputation based web filters and network egress restrictions for phishing and C2 related tasks. 
 
@@ -11,7 +11,7 @@ See [CHANGELOG](./CHANGELOG) for history of updates and release notes!
 ## Features
 
 - Retrieve specified number of recently expired and deleted domains (.com, .net, .org) from ExpiredDomains.net
-  - Note: You will need credentials from expireddomains.net for full functionality
+- Note: You will need credentials from expireddomains.net for full functionality
 - Retrieve available domains based on keyword search from ExpiredDomains.net
 - Perform reputation checks against the Symantec WebPulse Site Review (BlueCoat), IBM x-Force, and Cisco Talos
 - Sort results by domain age (if known) and filter for reputation
@@ -40,13 +40,17 @@ Optional - Install additional OCR support dependencies
 
 - Debian/Ubuntu: `apt-get install tesseract-ocr python3-pil`
 
-### Docker
+## Configuration (optional)
 
-1. Build the image
-`docker build -t domainhunter .`
+To avoid passing some credentials in the command line, you can put them in a yaml configuration file. A good starting point is to copy the file [conf.yml.example](conf.yml.example) to `$HOME/.config/domainhunter/conf.yml` and fill it correctly. If you don't want to copy it to your config directory, you can set a filled file as the environment variable `DOMAIN_HUNTER_CONF`.
+    
+    Example:
 
-2. Run it with your arguments
-`docker run -it domainhunter [args]`
+    $ export DOMAIN_HUNTER_CONF=/path/to/filled/conf.yml
+    $ python3 domainhunter.py ....
+
+    # or on one line
+    DOMAIN_HUNTER_CONF=/path/to/filled/conf.yml python3 domainhunter.py ....
 
 ## Usage
 

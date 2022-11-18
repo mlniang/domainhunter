@@ -8,3 +8,6 @@ Pipfile*
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
+.envrc
+.direnv/
+**/__pycache__/**
